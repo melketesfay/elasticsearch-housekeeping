@@ -3,13 +3,14 @@ from dataclasses import dataclass
 import os
 import re
 import requests
+import json
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 from datetime import date, datetime, timezone
 
 
 # Default connection settings (can be overridden by environment variables)
-ES_URL=os.environ.get("ELASTIC_URL", "http://localhost:9200").rstrip("/")
+# ES_URL=os.environ.get("ELASTIC_URL", "http://localhost:9200").rstrip("/")
 
 @dataclass(frozen=True)
 class IndexInfo:
@@ -40,9 +41,9 @@ def format_bytes(size_bytes: int) -> str:
     for einheit in ['KB', 'MB', 'GB', 'TB', 'PB']:
         value /= 1024.0
         if value < 1024.0:
-            return f"{value:.2f} {einheit}"
+            return f"{value:.1f} {einheit}"
 
-    return f"{value:.2f} PB"  # Falls die Größe größer als TB ist
+    return f"{value:.1f} PB"  # Falls die Größe größer als TB ist
 
 
 
@@ -190,3 +191,69 @@ def get_indices(pattern: list[str] | str = "*") -> list[IndexInfo]:
         )
 
     return indices
+
+
+def format_table(indices: list[IndexInfo]) -> str:
+    """Formatiert eine Liste von Indices als saubere Terminal-Tabelle."""
+    if not indices:
+        return "Keine Indices gefunden."
+
+    headers = ["NAME", "HEALTH", "DOCS", "SIZE", "AGE", "MANAGED"]
+
+    health_icons = {
+        "green": "🟢 green",
+        "yellow": "🟡 yellow",
+        "red": "🔴 red",
+    }
+
+    # Daten-Zeilen vorbereiten
+    rows = []
+    for idx in indices:
+        h_display = health_icons.get(idx.health.lower(), idx.health)
+        rows.append(
+            [
+                idx.name,
+                h_display,
+                str(idx.document_count),
+                idx.human_size,
+                f"{idx.age}d",
+                "Yes" if idx.managed else "No",
+            ]
+        )
+
+    # Maximale Breite pro Spalte berechnen
+    col_widths = [len(h) for h in headers]
+    for row in rows:
+        for col_idx, cell in enumerate(row):
+            col_widths[col_idx] = max(col_widths[col_idx], len(cell))
+
+    # Kopfzeile und Trennlinie bauen
+    header_line = "  ".join(
+        h.ljust(col_widths[i]) for i, h in enumerate(headers)
+    )
+    separator_line = "  ".join("-" * col_widths[i] for i in range(len(headers)))
+
+    # Zeilen zusammenbauen
+    body_lines = [
+        "  ".join(cell.ljust(col_widths[i]) for i, cell in enumerate(row))
+        for row in rows
+    ]
+
+    return "\n".join([header_line, separator_line] + body_lines)
+
+
+def format_json(indices: list[IndexInfo]) -> str:
+    """Formatiert eine Liste von Indices als maschinenlesbares JSON."""
+    data = [
+        {
+            "name": idx.name,
+            "health": idx.health,
+            "document_count": idx.document_count,
+            "primary_storage_size_bytes": idx.primary_storage_size,
+            "primary_storage_size": idx.human_size,
+            "age_days": idx.age,
+            "managed": idx.managed,
+        }
+        for idx in indices
+    ]
+    return json.dumps(data, indent=2)

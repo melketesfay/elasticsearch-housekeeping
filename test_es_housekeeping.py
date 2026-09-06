@@ -7,7 +7,9 @@ from es_housekeeping import (
     format_bytes,
     parse_index_age,
     get_session,
-    get_indices
+    get_indices,
+    format_json,
+    format_table
     )
 
 
@@ -16,18 +18,18 @@ def test_format_bytes():
 
     assert format_bytes(0) == "0 B"
     assert format_bytes(512) == "512 B"
-    assert format_bytes(1024) == "1.00 KB"
-    assert format_bytes(1536) == "1.50 KB"
-    assert format_bytes(1048576) == "1.00 MB"
-    assert format_bytes(1073741824) == "1.00 GB"
-    assert format_bytes(1099511627776) == "1.00 TB"
-    assert format_bytes(1024**5) == "1.00 PB"  # Test for PB
+    assert format_bytes(1024) == "1.0 KB"
+    assert format_bytes(1536) == "1.5 KB"
+    assert format_bytes(1048576) == "1.0 MB"
+    assert format_bytes(1073741824) == "1.0 GB"
+    assert format_bytes(1099511627776) == "1.0 TB"
+    assert format_bytes(1024**5) == "1.0 PB"  # Test for PB
 
 
 def test_index_info_properties():
     """TEstet die abgeleiteten Eigenschaften @property von IndexInfo."""
     idx_normal = IndexInfo("logs-2025-01-01", "green", 1000, 1048576, 10, True)
-    assert idx_normal.human_size == "1.00 MB"
+    assert idx_normal.human_size == "1.0 MB"
     assert idx_normal.is_system_index is False
 
     idx_system = IndexInfo(".kibana_1", "green", 1000, 1048576, 10, True)
@@ -136,5 +138,40 @@ def test_get_indices_success(monkeypatch):
     assert idx.health == "green"
     assert idx.document_count == 100
     assert idx.primary_storage_size == 1048576
-    assert idx.human_size == "1.00 MB"  # bzw 1.0 MB je nach Formatierung
+    assert idx.human_size == "1.0 MB"  # bzw 1.0 MB je nach Formatierung
     assert idx.managed is True
+
+
+def test_format_table_empty():
+    """Randfall: Leere Liste gibt benutzerfreundlichen Hinweis."""
+    assert format_table([]) == "Keine Indices gefunden."
+
+
+def test_format_table_content():
+    """Happy Path: Tabelle enthält Header und formatierte Werte."""
+    indices = [
+        IndexInfo("logs-test", "green", 1500, 2048000, 15, True),
+    ]
+    table = format_table(indices)
+    assert "NAME" in table
+    assert "HEALTH" in table
+    assert "logs-test" in table
+    assert "2.0 MB" in table
+    assert "15d" in table
+    assert "Yes" in table
+
+
+def test_format_json():
+    """Happy Path: Erzeugt valides JSON mit allen Feldern."""
+    indices = [
+        IndexInfo("logs-test", "green", 100, 1024, 5, False),
+    ]
+    json_str = format_json(indices)
+    parsed = json.loads(json_str)
+
+    assert isinstance(parsed, list)
+    assert len(parsed) == 1
+    assert parsed[0]["name"] == "logs-test"
+    assert parsed[0]["primary_storage_size_bytes"] == 1024
+    assert parsed[0]["primary_storage_size"] == "1.0 KB"
+    assert parsed[0]["managed"] is False
