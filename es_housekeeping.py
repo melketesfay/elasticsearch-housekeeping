@@ -12,6 +12,12 @@ from datetime import date, datetime, timezone
 # Default connection settings (can be overridden by environment variables)
 # ES_URL=os.environ.get("ELASTIC_URL", "http://localhost:9200").rstrip("/")
 
+def get_es_url() -> str:
+    """Liest die Basis-URL des Clusters dynamisch aus den Umgebungsvariablen."""
+    return os.environ.get("ELASTIC_URL", "http://localhost:9200").rstrip("/")
+
+es_url = get_es_url()
+
 @dataclass(frozen=True)
 class IndexInfo:
     name: str
@@ -97,9 +103,6 @@ def get_session() -> requests.Session:
     session.mount("https://", adapter)
     return session
 
-def get_es_url() -> str:
-    """Liest die Basis-URL des Clusters dynamisch aus den Umgebungsvariablen."""
-    return os.environ.get("ELASTIC_URL", "http://localhost:9200").rstrip("/")
 
 
 def get_auth_and_verify():
@@ -124,7 +127,6 @@ def get_indices(pattern: list[str] | str = "*") -> list[IndexInfo]:
         pattern = ",".join(pattern)
 
     target= pattern.replace(" ", "")
-    es_url = get_es_url()
     auth, verify = get_auth_and_verify()
     session = get_session()
 
@@ -257,3 +259,56 @@ def format_json(indices: list[IndexInfo]) -> str:
         for idx in indices
     ]
     return json.dumps(data, indent=2)
+
+
+def find_stale_indices(
+    indices: list[IndexInfo], older_than_days: int
+) -> list[IndexInfo]:
+    """Findet alle Indices, die älter als older_than_days Tage und KEINE System-Indices sind."""
+    return [
+        idx
+        for idx in indices
+        if idx.age > older_than_days and not idx.is_system_index
+    ]
+
+
+def delete_indices(indices: list[IndexInfo]) -> list[str]:
+    """Löscht die angegebenen Indices endgültig aus Elasticsearch."""
+    if not indices:
+        return []
+
+    # Letzte Sicherheits-Barriere: Niemals System-Indices löschen!
+    names = [idx.name for idx in indices]
+    for name in names:
+        if name.startswith("."):
+            raise ValueError(
+                f"SICHERHEITSALARM: Versuch, System-Index '{name}' zu löschen, wurde blockiert!"
+            )
+
+    target = ",".join(names)
+    auth, verify = get_auth_and_verify()
+    # DELETE-Aufrufe bewusst ohne automatischen Retry absetzen (Schutz vor inkonsistenten Mutationen)
+    r = requests.delete(f"{es_url}/{target}", auth=auth, verify=verify, timeout=30)
+    r.raise_for_status()
+    return names
+
+
+def close_indices(indices: list[IndexInfo]) -> list[str]:
+    """Schliesst die angegebenen Indices (gibt JVM-Heap frei, erhält Rohdaten auf Disk für Compliance)."""
+    if not indices:
+        return []
+
+    # Letzte Sicherheits-Barriere: Niemals System-Indices schliessen!
+    names = [idx.name for idx in indices]
+    for name in names:
+        if name.startswith("."):
+            raise ValueError(
+                f"SICHERHEITSALARM: Versuch, System-Index '{name}' zu schliessen, wurde blockiert!"
+            )
+
+    target = ",".join(names)
+    auth, verify = get_auth_and_verify()
+    # POST-Aufruf ohne automatische Retries (Schutz vor inkonsistenten Mutationen)
+    r = requests.post(f"{es_url}/{target}/_close", auth=auth, verify=verify, timeout=30)
+    r.raise_for_status()
+    return names

@@ -9,7 +9,10 @@ from es_housekeeping import (
     get_session,
     get_indices,
     format_json,
-    format_table
+    format_table,
+    find_stale_indices,
+    delete_indices,
+    close_indices
     )
 
 
@@ -175,3 +178,85 @@ def test_format_json():
     assert parsed[0]["primary_storage_size_bytes"] == 1024
     assert parsed[0]["primary_storage_size"] == "1.0 KB"
     assert parsed[0]["managed"] is False
+
+
+
+def test_find_stale_indices_filter():
+    """Filter-Logik: Findet Indices älter als N Tage."""
+    idx_fresh = IndexInfo("logs-fresh", "green", 10, 100, 5, False)
+    idx_stale = IndexInfo("logs-old", "green", 10, 100, 45, False)
+
+    stale = find_stale_indices([idx_fresh, idx_stale], older_than_days=30)
+    assert len(stale) == 1
+    assert stale[0].name == "logs-old"
+
+
+def test_find_stale_indices_protects_system_indices():
+    """THREAT MODEL TEST: System-Indices (.*) werden NIEMALS als stale eingestuft!"""
+    idx_system = IndexInfo(".kibana_7", "yellow", 100, 5000, 365, False)
+    stale = find_stale_indices([idx_system], older_than_days=30)
+    assert len(stale) == 0
+
+
+def test_delete_indices_safety_barrier():
+    """THREAT MODEL TEST: delete_indices bricht mit ValueError ab, falls ein System-Index durchschlüpft."""
+    idx_system = IndexInfo(".security_7", "green", 10, 1000, 100, False)
+
+    with pytest.raises(ValueError, match="SICHERHEITSALARM"):
+        delete_indices([idx_system])
+
+
+def test_close_indices_safety_barrier():
+    """THREAT MODEL TEST: close_indices bricht mit ValueError ab, falls ein System-Index durchschlüpft."""
+    idx_system = IndexInfo(".kibana_alerting", "green", 5, 500, 100, False)
+
+    with pytest.raises(ValueError, match="SICHERHEITSALARM"):
+        close_indices([idx_system])
+
+
+def test_close_indices_success(monkeypatch):
+    """COMPLIANCE & SYSTEM TEST: close_indices sendet POST an /_close Endpunkt."""
+    called_urls = []
+
+    class MockResponse:
+        def raise_for_status(self):
+            pass
+
+    def mock_post(url, **kwargs):
+        called_urls.append(url)
+        return MockResponse()
+
+    monkeypatch.setattr("requests.post", mock_post)
+
+    indices = [
+        IndexInfo("logs-2025.01.01", "green", 10, 1000, 400, False),
+        IndexInfo("logs-2025.01.02", "green", 20, 2000, 399, False),
+    ]
+    result = close_indices(indices)
+    assert result == ["logs-2025.01.01", "logs-2025.01.02"]
+    assert len(called_urls) == 1
+    assert called_urls[0].endswith("/logs-2025.01.01,logs-2025.01.02/_close")
+
+
+def test_delete_indices_success(monkeypatch):
+    """SYSTEM TEST: delete_indices sendet DELETE an /<target> Endpunkt."""
+    called_urls = []
+
+    class MockResponse:
+        def raise_for_status(self):
+            pass
+
+    def mock_delete(url, **kwargs):
+        called_urls.append(url)
+        return MockResponse()
+
+    monkeypatch.setattr("requests.delete", mock_delete)
+
+    indices = [
+        IndexInfo("logs-2025.01.01", "green", 10, 1000, 400, False),
+        IndexInfo("logs-2025.01.02", "green", 20, 2000, 399, False),
+    ]
+    result = delete_indices(indices)
+    assert result == ["logs-2025.01.01", "logs-2025.01.02"]
+    assert len(called_urls) == 1
+    assert called_urls[0].endswith("/logs-2025.01.01,logs-2025.01.02")
