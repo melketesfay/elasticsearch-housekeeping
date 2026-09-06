@@ -107,7 +107,7 @@ Housekeeping tools perform inherently destructive actions (`DELETE`, `_close`). 
 
 ### 4.1 Why `uv`?
 
-We consciously selected [`uv`](https://github.com/astral-sh/uv) (developed in Rust by Astral) as our primary toolchain manager for several engineering reasons:
+I consciously selected [`uv`](https://github.com/astral-sh/uv) (developed in Rust by Astral) as our primary toolchain manager for several engineering reasons:
 
 - **Performance:** Dependency resolution and installation is 10–100× faster than traditional `pip` or `poetry`.
 - **Determinism:** The `uv.lock` file guarantees that every developer and CI runner installs byte-for-byte identical dependency versions across macOS, Linux, and Windows.
@@ -305,6 +305,6 @@ Due to strict time management (~5 hours invested to deliver a clean, focused, an
 4. **Snapshot-Before-Delete Verification Hook:**
    - Before executing a destructive `DELETE`, the CLI could query Elasticsearch Snapshot Repositories to verify that an immutable snapshot exists for the target index, aborting if no backup is found.
 5. **Triage & Remediation of the AI Red-Team Security Audit (`SECURITY_AUDIT_es-housekeeping.md`):**
-   - As an proactive security measure, we commissioned an extensive red-team security code audit (documented in [`SECURITY_AUDIT_es-housekeeping.md`](file:///Users/tesfa/Desktop/projects/webdev/externe-aufträge/kastgroup/es-housekeeping/SECURITY_AUDIT_es-housekeeping.md)).
+   - As an proactive security measure, I commissioned an extensive red-team security code audit (documented in [`SECURITY_AUDIT_es-housekeeping.md`](es-housekeeping/SECURITY_AUDIT_es-housekeeping.md)).
    - Due to the strict 4–6 hour time budget (~5 hours invested), there was intentionally no time remaining to analyze all findings and patch the codebase in this iteration.
    - With additional time, my immediate priority would be to triage and implement the suggested hardening measures (such as preventing URL-embedded credential leakage in `ELASTIC_URL`, making `--dry-run`/`--apply` mutually exclusive CLI flags, refining ILM metadata evaluation, and adding TOCTOU index UUID re-validation before mutations).
