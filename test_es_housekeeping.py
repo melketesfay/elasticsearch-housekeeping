@@ -12,7 +12,8 @@ from es_housekeeping import (
     format_table,
     find_stale_indices,
     delete_indices,
-    close_indices
+    close_indices,
+    validate_positive_int
     )
 
 
@@ -260,3 +261,12 @@ def test_delete_indices_success(monkeypatch):
     assert result == ["logs-2025.01.01", "logs-2025.01.02"]
     assert len(called_urls) == 1
     assert called_urls[0].endswith("/logs-2025.01.01,logs-2025.01.02")
+
+def test_validate_positive_int():
+    """INPUT VALIDATION TEST: Prüft Validierung von Tageswerten."""
+    assert validate_positive_int("30") == 30
+    assert validate_positive_int("0") == 0
+    with pytest.raises(argparse.ArgumentTypeError, match="Wert darf nicht negativ sein"):
+        validate_positive_int("-5")
+    with pytest.raises(argparse.ArgumentTypeError, match="Ungültige Ganzzahl"):
+        validate_positive_int("abc")

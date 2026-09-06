@@ -1,12 +1,16 @@
-
-from dataclasses import dataclass
+import argparse
+import json
 import os
 import re
+import sys
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
 import requests
-import json
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
-from datetime import date, datetime, timezone
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 # Default connection settings (can be overridden by environment variables)
@@ -162,7 +166,7 @@ def get_indices(pattern: list[str] | str = "*") -> list[IndexInfo]:
 
     # 3. Zusammenführen über den Index-Namen (O(1) Dictionary Lookup)
     indices: list[IndexInfo] = []
-    today = date.today()
+    today = datetime.now(timezone.utc).date()
 
     for row in cat_data:
         name = row["index"]
@@ -312,3 +316,224 @@ def close_indices(indices: list[IndexInfo]) -> list[str]:
     r = requests.post(f"{es_url}/{target}/_close", auth=auth, verify=verify, timeout=30)
     r.raise_for_status()
     return names
+
+
+
+def validate_positive_int(value: str) -> int:
+    """Validiert, dass ein Argument eine nicht-negative Ganzzahl ist."""
+    try:
+        ivalue = int(value)
+        if ivalue < 0:
+            raise argparse.ArgumentTypeError(f"Wert darf nicht negativ sein: {value}")
+        return ivalue
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"Ungültige Ganzzahl: {value}")
+
+
+def parse_args():
+    description = """
+Elasticsearch Index Housekeeping Tool
+--------------------------------------
+Inspect, report, and safely clean up indices in Elasticsearch clusters.
+"""
+
+    epilog = """
+Examples:
+  # 1. Report: Cluster-Status und alle Indices als Tabelle anzeigen:
+  python es_housekeeping.py report
+
+  # 2. Report: Mehrere Patterns filtern (kommagetrennt):
+  python es_housekeeping.py report --pattern "logs-*,metrics-*"
+
+  # 3. Report: Maschinenlesbares JSON für Piping (z.B. mit jq):
+  python es_housekeeping.py report --pattern "logs-*" --json | jq '.[].name'
+
+  # 4. Cleanup Vorschau (Dry-Run ist IMMER Standard):
+  python es_housekeeping.py cleanup --pattern "logs-*,audit-*" --older-than 30
+
+  # 5. Cleanup Ausführen (Standard ist CLOSE -> Heap freigeben, reversibel):
+  python es_housekeeping.py cleanup --pattern "logs-*" --older-than 30 --apply
+
+  # 6. Cleanup Ausführen (DELETE -> Unwiderruflich von Disk löschen):
+  python es_housekeeping.py cleanup --older-than 90 --action delete --apply
+
+  # 7. Non-Interactive für CI/CD & Cron-Jobs (--force überspringt Bestätigung):
+  python es_housekeeping.py cleanup --older-than 30 --apply --force
+
+Environment Variables:
+  ELASTIC_URL          Base URL des Elasticsearch Clusters (Standard: http://localhost:9200)
+  ELASTIC_USER         Optional: Basic-Auth Benutzername
+  ELASTIC_PASS         Optional: Basic-Auth Passwort (wird niemals geloggt)
+  ELASTIC_INSECURE     Optional: 'true' deaktiviert TLS-Zertifikatsprüfung (für Dev-Cluster)
+  ELASTIC_CA_BUNDLE    Optional: Pfad zu einer eigenen CA-Zertifikatsdatei (.crt/.pem)
+"""
+
+    parser = argparse.ArgumentParser(
+        description=description,
+        epilog=epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(
+        dest="command", help="Verfügbare Befehle"
+    )
+
+    # 1. Befehl: report
+    report_parser = subparsers.add_parser("report", help="Indices auflisten")
+    report_parser.add_argument(
+        "--pattern", default="*", help="Index-Muster (z.B. '*' oder 'logs-*,metrics-*')"
+    )
+    report_parser.add_argument(
+        "--json", action="store_true", help="Ausgabe als maschinenlesbares JSON"
+    )
+
+    # 2. Befehl: cleanup
+    cleanup_parser = subparsers.add_parser(
+        "cleanup", help="Veraltete Indices aufräumen"
+    )
+    cleanup_parser.add_argument(
+        "--pattern", default="logs-*", help="Index-Muster (z.B. 'logs-*' oder 'logs-*,metrics-*')"
+    )
+    cleanup_parser.add_argument(
+        "--older-than",
+        type=validate_positive_int,
+        default=30,
+        help="Indices älter als N Tage (Standard: 30, darf nicht negativ sein)",
+    )
+    cleanup_parser.add_argument(
+        "--action",
+        choices=["close", "delete"],
+        default="close",
+        help="Aktion für veraltete Indices: 'close' (Standard: Heap freigeben, reversibel) oder 'delete' (unwiderruflich)",
+    )
+    cleanup_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Tatsächlich ausführen (Standard ist Dry-Run!)",
+    )
+    cleanup_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Interaktive Bestätigung überspringen (z.B. für CI/CD)",
+    )
+
+    return parser
+
+
+def run_cli():
+    """Führt die CLI-Logik aus."""
+    parser = parse_args()
+    args = parser.parse_args()
+
+    command = args.command or "report"
+
+    if command == "report":
+        pattern = getattr(args, "pattern", "*")
+        indices = get_indices(pattern)
+
+        # stdout für Nutzdaten reserviert
+        if getattr(args, "json", False):
+            print(format_json(indices))
+        else:
+            print(format_table(indices))
+
+    elif command == "cleanup":
+        indices = get_indices(args.pattern)
+        stale = find_stale_indices(indices, older_than_days=args.older_than)
+
+        if not stale:
+            print(
+                f"Keine veralteten Indices gefunden (Muster: '{args.pattern}', älter als {args.older_than}d).",
+                file=sys.stderr,
+            )
+            return
+
+        print(
+            f"Gefundene veraltete Indices ({len(stale)}, älter als {args.older_than} Tage):\n",
+            file=sys.stderr,
+        )
+        print(format_table(stale), file=sys.stderr)
+
+        total_bytes = sum(idx.primary_storage_size for idx in stale)
+        if args.action == "delete":
+            print(f"\nFreizugebender Disk-Speicherplatz: {format_bytes(total_bytes)}", file=sys.stderr)
+        else:
+            print(f"\nBetroffene Datenmenge: {format_bytes(total_bytes)} (nach Close nicht mehr im JVM-Heap gecacht)", file=sys.stderr)
+
+        # Dry-Run Schutz
+        action_verb = "Löschen" if args.action == "delete" else "Schliessen"
+        if not args.apply:
+            print(
+                f"\n[DRY-RUN] Es wurden keine Änderungen vorgenommen. Verwende --apply zum {action_verb}.",
+                file=sys.stderr,
+            )
+            return
+
+        # Interaktive Sicherheitsabfrage
+        if not args.force:
+            prompt_msg = (
+                f"\nMöchtest du diese {len(stale)} Indices wirklich UNWIDERRUFLICH LÖSCHEN? [y/N]: "
+                if args.action == "delete"
+                else f"\nMöchtest du diese {len(stale)} Indices schliessen (Daten bleiben auf Disk)? [y/N]: "
+            )
+            confirm = input(prompt_msg).strip().lower()
+            if confirm != "y":
+                print(
+                    f"Abgebrochen. Es wurden keine Indices {'gelöscht' if args.action == 'delete' else 'geschlossen'}.",
+                    file=sys.stderr,
+                )
+                return
+
+        if args.action == "delete":
+            deleted = delete_indices(stale)
+            print(f"\nErfolgreich gelöscht: {', '.join(deleted)}", file=sys.stderr)
+        else:
+            closed = close_indices(stale)
+            print(
+                f"\nErfolgreich geschlossen: {', '.join(closed)}\n"
+                f"Hinweis: JVM-Heap freigegeben. Daten bleiben auf Disk erhalten.\n"
+                f"Wiedereröffnen bei Bedarf mit: POST /{es_url}/{','.join(closed)}/_open",
+                file=sys.stderr,
+            )
+
+
+def main():
+    """Haupteinstiegspunkt mit Exception-Hygiene (keine rohen Tracebacks für den Operator)."""
+    try:
+        run_cli()
+    except requests.exceptions.ConnectionError:
+        print(
+            f"Fehler: Elasticsearch unter '{es_url}' nicht erreichbar.\n"
+            f"Läuft der Cluster? (z.B. mit 'docker compose up -d')",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    except requests.exceptions.Timeout:
+        print(
+            "Fehler: Zeitüberschreitung (Timeout) bei der Kommunikation mit Elasticsearch.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    except requests.exceptions.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "unbekannt"
+        if status in (401, 403):
+            print(
+                f"Fehler: Authentifizierung fehlgeschlagen (HTTP {status}).\n"
+                f"Bitte prüfe ELASTIC_USER und ELASTIC_PASS.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"Fehler: Elasticsearch API meldet HTTP {status}.",
+                file=sys.stderr,
+            )
+        sys.exit(1)
+    except ValueError as exc:
+        print(f"{exc}", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\nVorgang durch Benutzer abgebrochen.", file=sys.stderr)
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()
