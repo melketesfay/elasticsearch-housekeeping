@@ -1,9 +1,12 @@
 
 from dataclasses import dataclass
 import os
+import re
+from datetime import date, datetime
+
 
 # Default connection settings (can be overridden by environment variables)
-ES_URL = os.environ.get("ELASTIC_URL", "http://localhost:9200").rstrip("/")
+ES_URL=os.environ.get("ELASTIC_URL", "http://localhost:9200").rstrip("/")
 
 @dataclass(frozen=True)
 class IndexInfo:
@@ -24,41 +27,40 @@ class IndexInfo:
         """Check if the index is a system index (starts with a dot)."""
         return self.name.startswith(".")
 
-    @property
-    def is_empty(self) -> bool:
-        """Return whether this index contains no documents."""
-        return self.document_count == 0
-
-    @classmethod
-    def from_mapping(cls, data: dict) -> "IndexInfo":
-        """Build an instance from an Elasticsearch index response."""
-        return cls(
-            name=str(data["name"]),
-            health=str(data.get("health", "unknown")),
-            document_count=int(data.get("document_count", data.get("docs.count", 0))),
-            primary_storage_size=int(
-                data.get("primary_storage_size", data.get("pri.store.size", 0))
-            ),
-            age=int(data.get("age", 0)),
-            managed=bool(data.get("managed", False)),
-        )
-
 def format_bytes(size_bytes: int) -> str:
-    """Convert a byte count to a readable binary unit."""
-    if size_bytes < 0:
-        raise ValueError("size_bytes must not be negative")
-
+    """Wandelt Bytes in lesbare Einheiten (B, KB, MB, GB, TB) um."""
     if size_bytes < 1024:
         return f"{size_bytes} B"
 
+
     value = float(size_bytes)
-    for unit in ("KB", "MB", "GB", "TB", "PB"):
+    for einheit in ['KB', 'MB', 'GB', 'TB', 'PB']:
         value /= 1024.0
         if value < 1024.0:
-            return f"{value:.2f} {unit}"
+            return f"{value:.2f} {einheit}"
 
-    return f"{value:.2f} PB"
+    return f"{value:.2f} PB"  # Falls die Größe größer als TB ist
 
-# Gute Completion-Vorschläge in VS Code benötigen gültiges Python, Typannotationen,
-# Docstrings sowie einen ausgewählten Python-Interpreter und aktivierten Linter.
 
+
+def parse_index_age(name: str, creation_ms: str | int | None, today: date) -> int:
+    """Berechnet das Alter eines Index:
+    1. Priorität: Datum im Index-Namen (z.B. logs-2025.07.31) -> Retention-Datum!
+    2. Priorität (Fallback): creation_date aus den Cluster-Settings.
+    """
+    # Prio 1: Suche nach YYYY.MM.DD, YYYY-MM-DD oder YYYY_MM_DD im Indexnamen
+    match = re.search(r'(\d{4})[-._](\d{2})[-._](\d{2})', name)
+    if match:
+        year, month, day = map(int, match.groups())
+        parsed_date = date(year, month, day)
+        return max(0, (today - parsed_date).days)
+
+    # Prio 2: Fallback auf creation_date aus den Cluster-Settings
+    if creation_ms:
+        created_date = date.fromtimestamp(int(creation_ms) / 1000)
+        return max(0, (today - created_date).days)
+
+    return 0  # Wenn kein Datum gefunden wurde, Alter auf 0 setzen
+
+print(parse_index_age("logs-2025-07-31", None, date(2025, 8, 1)))  # Erwartet: 1
+print(parse_index_age("logs-2025-07-31", "1690848000000", date(2025, 8, 1)))  # Erwartet: 1
