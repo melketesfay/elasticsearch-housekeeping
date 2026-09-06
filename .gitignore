@@ -1,5 +1,12 @@
-.env (elementar!)
+# Secrets & Env (Nie einchecken!)
+.env
+.env.local
+
+# Python Cache & Virtual Environments
 .venv/
-__pycache__/, *.py[cod]
+__pycache__/
+*.py[cod]
+
+# Testing & OS
 .pytest_cache/
 .DS_Store
