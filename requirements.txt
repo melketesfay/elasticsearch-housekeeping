@@ -1,0 +1,8 @@
+# Core Dependencies
+python-dotenv>=1.2.3
+requests>=2.34.2
+urllib3>=2.7.0
+
+# Development & Testing
+pytest>=9.1.1
+
