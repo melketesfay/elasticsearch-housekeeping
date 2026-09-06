@@ -1,7 +1,14 @@
 import pytest
 from datetime import date, datetime , timezone
 import json
-from es_housekeeping import (IndexInfo, format_bytes, parse_index_age)
+import argparse
+from es_housekeeping import (
+    IndexInfo,
+    format_bytes,
+    parse_index_age,
+    get_session,
+    get_indices
+    )
 
 
 def test_format_bytes():
@@ -60,3 +67,74 @@ def test_parse_index_age_missing_all():
     today = date(2026, 9, 5)
     age = parse_index_age("unknown-index", None, today)
     assert age == 0
+
+def test_get_session_retry_configuration():
+    """RESILIENZ TEST: Prüft, dass HTTP-Session mit Retries (Exponential Backoff) nur für GET konfiguriert ist."""
+    session = get_session()
+    adapter = session.adapters["http://"]
+    assert adapter.max_retries.total == 5
+    assert adapter.max_retries.backoff_factor == 0.5
+    assert set(adapter.max_retries.status_forcelist) == {500, 502, 503, 504}
+    assert set(adapter.max_retries.allowed_methods) == {"GET"}
+
+
+def test_get_indices_404_returns_empty(monkeypatch):
+    """FEHLERTOLERANZ TEST: Prüft, dass ein 404 von Elasticsearch sauber als leere Liste abgefangen wird."""
+    class MockResponse:
+        status_code = 404
+        text = '{"error":"no such index"}'
+
+    class MockSession:
+        def get(self, *args, **kwargs):
+            return MockResponse()
+
+    monkeypatch.setattr("es_housekeeping.get_session", lambda: MockSession())
+    result = get_indices("nonexistent-*")
+    assert result == []
+
+def test_get_indices_success(monkeypatch):
+    """HAPPY PATH TEST: Prüft das saubere Mergen von Cat-API und Settings-API zu IndexInfo."""
+    class MockCatResponse:
+        status_code = 200
+        text = '[{"index": "logs-2025.01.01", "health": "green", "docs.count": "100", "pri.store.size": "1048576"}]'
+        def json(self):
+            import json
+            return json.loads(self.text)
+        def raise_for_status(self):
+            pass
+
+    class MockSettingsResponse:
+        status_code = 200
+        def json(self):
+            return {
+                "logs-2025.01.01": {
+                    "settings": {
+                        "index": {
+                            "creation_date": "1735689600000",
+                            "lifecycle": {"name": "logs-policy"}
+                        }
+                    }
+                }
+            }
+        def raise_for_status(self):
+            pass
+
+    class MockSession:
+        def get(self, url, *args, **kwargs):
+            if "_cat/indices" in url:
+                return MockCatResponse()
+            elif "_settings" in url:
+                return MockSettingsResponse()
+            raise ValueError(f"Unerwartete URL: {url}")
+
+    monkeypatch.setattr("es_housekeeping.get_session", lambda: MockSession())
+
+    indices = get_indices("logs-*")
+    assert len(indices) == 1
+    idx = indices[0]
+    assert idx.name == "logs-2025.01.01"
+    assert idx.health == "green"
+    assert idx.document_count == 100
+    assert idx.primary_storage_size == 1048576
+    assert idx.human_size == "1.00 MB"  # bzw 1.0 MB je nach Formatierung
+    assert idx.managed is True
